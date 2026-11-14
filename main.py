@@ -1,9 +1,12 @@
 import argparse
 import asyncio
 import sys
+
 from loguru import logger
 
 from automaton import utils
+from automaton.pacing import Pacing
+from configs import configs
 
 
 class Help(object):
@@ -28,25 +31,40 @@ async def main():
 
     mode_flash = subparsers.add_parser('flash', add_help=False, help='对选定的课程执行刷课')
     target = mode_flash.add_mutually_exclusive_group(required=True)
-    target.add_argument('-i', '--id', help='指定书籍 ID')
+    target.add_argument('-i', '--id', help='指定书籍 ID（格式 courseId-bookId）')
     target.add_argument('-c', '--current', action='store_true', help='限定为当前课程或书籍')
     target.add_argument('-a', '--all', action='store_true', help='刷全部课程（慎用 除非你知道自己在做什么）')
+
+    mode_flash.add_argument('--limit', type=int, help='本次最多处理多少个任务点（先小步验证用）')
+    mode_flash.add_argument('--budget-minutes', type=float, help='本次累计上报时长上限（分钟）')
+    mode_flash.add_argument('--fast', action='store_true', help='不真实等待，仅用于验证提交链路')
     mode_flash.add_argument(*Help.args, **Help.kwargs)
 
     args = parser.parse_args()
 
     logger.remove()
-    logger.add(sys.stdout, level=['WARNING', 'INFO', 'DEBUG'][args.level or 0])
+    logger.add(sys.stdout, level=['WARNING', 'INFO', 'DEBUG'][args.level or 0], enqueue=False)
 
     if args.method == 'list':
         await utils.list_books(detail=args.detail)
-    else:
-        if args.id:
-            await utils.flash_by_id(args.id)
-        elif args.current:
-            await utils.flash_current()
-        elif args.all:
-            await utils.flash_all()
+        return
+
+    pacing = None
+    if getattr(args, 'limit', None) or getattr(args, 'budget_minutes', None) or getattr(args, 'fast', False):
+        pacing = Pacing(
+            configs.get('time'),
+            limit=args.limit,
+            budget_minutes=args.budget_minutes,
+            force_mode='fast' if args.fast else None,
+        )
+
+    if args.id:
+        await utils.flash_by_id(args.id, pacing)
+    elif args.current:
+        await utils.flash_current(pacing)
+    elif args.all:
+        await utils.flash_all(pacing)
+
 
 if __name__ == '__main__':
     loop = asyncio.new_event_loop()

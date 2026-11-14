@@ -1,9 +1,11 @@
 import asyncio
-import httpx
 import json
 import re
+import time
 import traceback
 import urllib.parse as parser
+
+import httpx
 import websockets
 from loguru import logger
 
@@ -24,7 +26,7 @@ class Browser(object):
     async def _verify(self):  # 校验客户端和配置文件中的用户是否相同
         try:
             logger.info('[账号校验] | 正在校验账号...')
-            page = await self.wait_for_page(r'https?://.*')
+            page = await self.wait_for_page(r'https?://.*', require_bridge=False, timeout=60)
             user_info = json.loads((await page.eval('''
                 (function () {
                     var xhr = new XMLHttpRequest()
@@ -48,21 +50,57 @@ class Browser(object):
         except Exception:
             logger.warning(f'[账号校验] | 账号校验出错：\n{traceback.format_exc()}')
 
-    async def wait_for_page(self, regexp):  # 等待符合条件的页面出现
-        async with httpx.AsyncClient() as client:
+    async def _bridge_ready(self, page):
+        """判断这个页面里有没有原生桥（NetBrowser.submitTask）。"""
+        try:
+            resp = await page.eval(
+                'typeof NetBrowser !== "undefined" && typeof NetBrowser.submitTask === "function"'
+            )
+            return bool(resp.get('result', {}).get('value'))
+        except Exception:
+            return False
+
+    async def wait_for_page(self, regexp=r'https?://.*', require_bridge=True, poll=2.0, timeout=300):
+        """等待符合条件的页面。
+
+        原实现把页面域名写死成 pc.ismartin.com，而该域名已经失效，
+        这里改为：先按 URL 正则粗筛，再优先选带 courseId/bookId 的页面，
+        最后用 NetBrowser 是否存在做终判——只要能拿到原生桥就能提交。
+        """
+        deadline = time.monotonic() + timeout
+        async with httpx.AsyncClient(timeout=10) as client:
             while True:
                 try:
                     pages = (await client.get(f'http://127.0.0.1:{self.port}/json')).json()
-                    for page in pages:
-                        if re.fullmatch(regexp, page['url']) and 'webSocketDebuggerUrl' in page:
-                            return Page(page['url'], page['webSocketDebuggerUrl'])
-                except httpx.ConnectError:
-                    pass
-                await asyncio.sleep(2)
+                except Exception:
+                    pages = []
+
+                candidates = [
+                    p for p in pages
+                    if 'webSocketDebuggerUrl' in p and re.fullmatch(regexp, p.get('url') or '')
+                ]
+                candidates.sort(
+                    key=lambda p: 0 if ('courseId' in (p.get('url') or '') or 'bookId' in (p.get('url') or '')) else 1
+                )
+
+                for p in candidates:
+                    page = Page(p['url'], p['webSocketDebuggerUrl'])
+                    if not require_bridge:
+                        return page
+                    if await self._bridge_ready(page):
+                        logger.info(f'[浏览器] | 已接管页面：{p["url"]}')
+                        return page
+
+                if time.monotonic() > deadline:
+                    raise TimeoutError(
+                        f'等待可用页面超时（{timeout} 秒）。请确认客户端已打开并停留在课程页面，'
+                        f'且快捷方式带 --remote-debugging-port={self.port}'
+                    )
+                await asyncio.sleep(poll)
 
     # noinspection PyTypeChecker
     async def get_current(self):
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=10) as client:
             pages = (await client.get(f'http://127.0.0.1:{self.port}/json')).json()
             for page in pages:
                 params = dict(parser.parse_qsl(parser.urlsplit(page['url']).query))
@@ -79,7 +117,7 @@ class Page(object):
         self.url, self.dev_url = url, dev_url
 
     async def send(self, command, params):
-        async with websockets.connect(self.dev_url) as devtools:
+        async with websockets.connect(self.dev_url, max_size=None) as devtools:
             await devtools.send(json.dumps({
                 'id': self.id,
                 'method': command,

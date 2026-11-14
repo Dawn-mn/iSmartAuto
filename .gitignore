@@ -1,5 +1,18 @@
 /.cache/*
 /venv/
+/.venv/
 /.idea/
 /.vscode/
 /**/*.pyc
+__pycache__/
+
+# 私有配置：账号密码等，绝不进版本库
+configs.local.yml
+
+# 运行期状态与日志
+.state/
+*.log
+.probe/
+
+# 工具链
+.gh/
