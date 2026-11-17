@@ -167,24 +167,31 @@ async def _flash(course_id, book_id, spider, pacing=None):
                 return
 
             if 'paperId' in task:  # 有题目才算任务点
-                score, questions, pages = await _analyze(spider, task['paperId'])
-                plan = pacing.plan(questions, pages)
-                await pacing.wait(plan)  # 先"学"，再提交
+                try:
+                    score, questions, pages = await _analyze(spider, task['paperId'])
+                    plan = pacing.plan(questions, pages)
+                    await pacing.wait(plan)  # 先"学"，再提交
 
-                result = await page.submit(
-                    book_id, task['chapterId'], task['id'], score, plan.seconds, 100, user_id
-                )
-                ok = not result.get('wasThrown') and result.get('result', {}).get('value')
-                if ok:
-                    _mark_done(task['id'], task.get('name'), plan.seconds, score)
-                    logger.success(
-                        f'[刷任务点] | {PLACEHOLDER * depth} 提交成功 得分 {score} 用时 {plan.seconds}s'
+                    result = await page.submit(
+                        book_id, task['chapterId'], task['id'], score, plan.seconds, 100, user_id
                     )
-                else:
+                    ok = not result.get('wasThrown') and result.get('result', {}).get('value')
+                    if ok:
+                        _mark_done(task['id'], task.get('name'), plan.seconds, score)
+                        logger.success(
+                            f'[刷任务点] | {PLACEHOLDER * depth} 提交成功 得分 {score} 用时 {plan.seconds}s'
+                        )
+                    else:
+                        logger.warning(
+                            f'[刷任务点] | {PLACEHOLDER * depth} 任务[{task.get("name")}]可能提交失败：{result}'
+                        )
+                    await pacing.maybe_break()
+                except Exception:
+                    # 单个任务点出错不中断整轮，下一轮会重新尝试
                     logger.warning(
-                        f'[刷任务点] | {PLACEHOLDER * depth} 任务[{task.get("name")}]可能提交失败：{result}'
+                        f'[刷任务点] | {PLACEHOLDER * depth} 任务[{task.get("name")}]出错，跳过：\n'
+                        f'{traceback.format_exc()}'
                     )
-                await pacing.maybe_break()
 
             for ch in node.child:
                 await dfs(ch, depth + 1)

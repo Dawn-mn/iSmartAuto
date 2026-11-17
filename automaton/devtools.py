@@ -24,18 +24,33 @@ class Browser(object):
         self.port = dev_port
 
     async def _verify(self):  # 校验客户端和配置文件中的用户是否相同
+        """账号校验只做提示，不阻断流程。
+
+        客户端的页面可能是 res://data/*.html 或 about:blank，在这些上下文里
+        同步 XHR 会被拒绝，`result.value` 直接不存在——这属于"查不到"，
+        不是"账号不符"，不能因此判定客户端不可用。
+        """
         try:
             logger.info('[账号校验] | 正在校验账号...')
-            page = await self.wait_for_page(r'https?://.*', require_bridge=False, timeout=60)
-            user_info = json.loads((await page.eval('''
+            page = await self.wait_for_page(r'https?://.*', require_bridge=True, timeout=60)
+            resp = await page.eval('''
                 (function () {
-                    var xhr = new XMLHttpRequest()
-                    xhr.open('POST', 'https://school.ismartlearning.cn/client/user/student-info', false)
-                    xhr.withCredentials = true
-                    xhr.send(null)
-                    return xhr.responseText
+                    try {
+                        var xhr = new XMLHttpRequest()
+                        xhr.open('POST', 'https://school.ismartlearning.cn/client/user/student-info', false)
+                        xhr.withCredentials = true
+                        xhr.send(null)
+                        return xhr.responseText
+                    } catch (e) {
+                        return ''
+                    }
                 })()
-            '''))['result']['value'])['data']
+            ''')
+            raw = (resp.get('result') or {}).get('value')
+            if not raw:
+                logger.warning('[账号校验] | 页面拒绝了这次查询，跳过校验（不影响刷课）')
+                return True
+            user_info = json.loads(raw)['data']
             spider_user = configs['user']['username']
             logger.debug(f'[账号校验] | 配置文件用户: {spider_user}')
             logger.debug(f'[账号校验] | 客户端用户: {json.dumps(user_info, indent=4)}')
@@ -48,7 +63,8 @@ class Browser(object):
                 logger.info('[账号校验] | 校验通过')
             return True
         except Exception:
-            logger.warning(f'[账号校验] | 账号校验出错：\n{traceback.format_exc()}')
+            logger.warning(f'[账号校验] | 账号校验出错（不影响继续）：\n{traceback.format_exc()}')
+            return True
 
     async def _bridge_ready(self, page):
         """判断这个页面里有没有原生桥（NetBrowser.submitTask）。"""

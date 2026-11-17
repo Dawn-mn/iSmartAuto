@@ -173,36 +173,41 @@ class Spider(httpx.AsyncClient):
         except Exception:
             logger.warning(f'[获取任务列表] | 获取任务列表出错：\n{traceback.format_exc()}')
 
-    async def get_paper(self, paper_id):  # 获取任务点信息（包括题目和答案）
-        try:
-            logger.info('[获取任务点] | 正在获取任务点信息...')
-            ticket = (await self.post(
-                'https://sso.ismartlearning.cn/v1/serviceTicket',
-                data={
-                    'service': 'https://xot-api.ismartlearning.cn/client/textbook/paperinfo'
-                }
-            )).json()['data']['serverTicket']
-            logger.debug(f'[获取任务点] | {ticket}')
-            paper_info = (await self.post(
-                'https://xot-api.ismartlearning.cn/client/textbook/paperinfo',
-                params={
-                    'ticket': ticket
-                },
-                data={
-                    'paperId': paper_id
-                },
-                headers={
-                    'Origin': 'https://me.ismartlearning.cn',
-                    'Referer': 'https://me.ismartlearning.cn/',
-                    'X-Requested-With': 'XMLHttpRequest',
-                    'Accept-Encoding': 'gzip, deflate'
-                }
-            )).json()['data']
-            # logger.debug(f'[获取任务点] | {json.dumps(paper_info, indent=4)}')
-            logger.success('[获取任务点] | 获取任务点信息完成')
-            return paper_info
-        except Exception:
-            logger.warning(f'[获取任务点] | 获取任务点出错：\n{traceback.format_exc()}')
+    async def get_paper(self, paper_id, attempts=3):  # 获取任务点信息（包括题目和答案）
+        for i in range(1, attempts + 1):
+            try:
+                logger.info(f'[获取任务点] | 正在获取任务点信息...（第 {i}/{attempts} 次）')
+                ticket = (await self.post(
+                    'https://sso.ismartlearning.cn/v1/serviceTicket',
+                    data={
+                        'service': 'https://xot-api.ismartlearning.cn/client/textbook/paperinfo'
+                    }
+                )).json()['data']['serverTicket']
+                logger.debug(f'[获取任务点] | {ticket}')
+                paper_info = (await self.post(
+                    'https://xot-api.ismartlearning.cn/client/textbook/paperinfo',
+                    params={
+                        'ticket': ticket
+                    },
+                    data={
+                        'paperId': paper_id
+                    },
+                    headers={
+                        'Origin': 'https://me.ismartlearning.cn',
+                        'Referer': 'https://me.ismartlearning.cn/',
+                        'X-Requested-With': 'XMLHttpRequest',
+                        'Accept-Encoding': 'gzip, deflate'
+                    }
+                )).json()['data']
+                # logger.debug(f'[获取任务点] | {json.dumps(paper_info, indent=4)}')
+                logger.success('[获取任务点] | 获取任务点信息完成')
+                return paper_info
+            except Exception:
+                logger.warning(f'[获取任务点] | 第 {i}/{attempts} 次出错：\n{traceback.format_exc()}')
+                if i < attempts:
+                    await asyncio.sleep(2 * i)
+        logger.error('[获取任务点] | 重试耗尽，返回 None')
+        return None
 
     async def user_info(self):
         try:
