@@ -46,14 +46,17 @@ class Spider(httpx.AsyncClient):
             raise LoginError(f'验证码识别失败：{code!r}')
         return code
 
-    async def login(self, username, password, attempts=CAPTCHA_ATTEMPTS):
+    async def login(self, username, password, attempts=CAPTCHA_ATTEMPTS, force=False):
         """登录，验证码识别错误时自动换一张重试。
 
         原实现只试一次且用 assert，识别错一次就整段抛异常，实测会有
         1/3 的概率直接失败。这里改为固定次数重试 + 明确异常。
+        force=True 用于会话中途失效（tgt 过期）后重新登录。
         """
-        if self.is_login:
+        self.credentials = (str(username), str(password))
+        if self.is_login and not force:
             return {}
+        self.is_login = False
 
         hashed = md5(md5(str(password).encode()).hexdigest().encode() + CAPTCHA_SALT).hexdigest()
         last = {}
@@ -173,17 +176,57 @@ class Spider(httpx.AsyncClient):
         except Exception:
             logger.warning(f'[获取任务列表] | 获取任务列表出错：\n{traceback.format_exc()}')
 
+    async def _service_ticket(self, service, attempts=4):
+        """向 SSO 换一个业务票据。
+
+        -23 / -21：tgt 没了，重新登录再换一次；
+        -25（生成st失败）：会话还在但拒绝签发，实测是换票频率触发的限流，
+        短重试没用，必须退避（30/60/120/240 秒），连续两次再换个会话试试。
+        """
+        relogged = False
+        for i in range(1, attempts + 1):
+            delay = 2 * i
+            try:
+                payload = (await self.post(
+                    'https://sso.ismartlearning.cn/v1/serviceTicket',
+                    data={'service': service}
+                )).json()
+                ticket = (payload.get('data') or {}).get('serverTicket')
+                if ticket:
+                    return ticket
+
+                result = payload.get('result') or {}
+                code = result.get('code')
+                logger.warning(f'[票据] | 获取 serviceTicket 失败 '
+                               f'code={code} msg={result.get("msg")}')
+
+                if code in (-23, -21):          # 会话失效
+                    logger.info('[票据] | 会话已失效，重新登录...')
+                    await self.login(*getattr(self, 'credentials', ('', '')), force=True)
+                    relogged = True
+                elif code == -25:               # 生成 st 失败：退避，别硬撞
+                    delay = 30 * (2 ** (i - 1))
+                    logger.info(f'[票据] | 疑似签发频控，退避 {delay}s 后重试')
+                    if i >= 2 and not relogged:
+                        logger.info('[票据] | 连续失败，重新登录以换新会话...')
+                        await self.login(*getattr(self, 'credentials', ('', '')), force=True)
+                        relogged = True
+            except Exception:
+                logger.warning(f'[票据] | 第 {i}/{attempts} 次异常：\n{traceback.format_exc()}')
+            if i < attempts:
+                await asyncio.sleep(delay)
+        logger.error(f'[票据] | {attempts} 次重试仍拿不到 serverTicket')
+        return None
+
     async def get_paper(self, paper_id, attempts=3):  # 获取任务点信息（包括题目和答案）
         for i in range(1, attempts + 1):
             try:
                 logger.info(f'[获取任务点] | 正在获取任务点信息...（第 {i}/{attempts} 次）')
-                ticket = (await self.post(
-                    'https://sso.ismartlearning.cn/v1/serviceTicket',
-                    data={
-                        'service': 'https://xot-api.ismartlearning.cn/client/textbook/paperinfo'
-                    }
-                )).json()['data']['serverTicket']
-                logger.debug(f'[获取任务点] | {ticket}')
+                ticket = await self._service_ticket(
+                    'https://xot-api.ismartlearning.cn/client/textbook/paperinfo')
+                if not ticket:
+                    raise RuntimeError('拿不到票据')
+
                 paper_info = (await self.post(
                     'https://xot-api.ismartlearning.cn/client/textbook/paperinfo',
                     params={
@@ -221,12 +264,10 @@ class Spider(httpx.AsyncClient):
     async def book_info(self, book_id):
         try:
             logger.info('[获取书籍信息] | 正在获取书籍信息...')
-            ticket = (await self.post(
-                'https://sso.ismartlearning.cn/v1/serviceTicket',
-                data={
-                    'service': 'https://book-api.ismartlearning.cn/client/v2/book/info'
-                }
-            )).json()['data']['serverTicket']
+            ticket = await self._service_ticket(
+                'https://book-api.ismartlearning.cn/client/v2/book/info')
+            if not ticket:
+                raise RuntimeError('拿不到票据')
             logger.debug(f'[获取书籍信息] | {ticket}')
             book_info = (await self.post(
                 'https://book-api.ismartlearning.cn/client/v2/book/info',

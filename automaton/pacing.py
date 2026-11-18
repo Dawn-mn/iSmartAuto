@@ -17,6 +17,7 @@
 
 import asyncio
 import math
+import os
 import random
 import time
 from dataclasses import dataclass
@@ -56,6 +57,11 @@ class Pacing(object):
         self.limit = limit                      # 最多处理几个任务点
         self.budget = budget_minutes * 60 if budget_minutes else None
 
+        # 每个账号的时长画像允许整体偏移：均值走 scale，离散度走 sigma。
+        # 两个账号若用完全相同的参数，上报秒数的分布形态会过于接近。
+        self.scale = float(os.getenv('ISMART_TIME_SCALE') or self.cfg.get('scale', 1.0))
+        self.sigma = float(os.getenv('ISMART_TIME_SIGMA') or self.cfg.get('jitter-sigma', 0.35))
+
     @property
     def exhausted(self):
         if self.limit is not None and self.tasks >= self.limit:
@@ -71,7 +77,7 @@ class Pacing(object):
         per_question = _urange(self.cfg.get('per-question'), 40)
         estimate = base + pages * per_page + questions * per_question
 
-        sigma = float(self.cfg.get('jitter-sigma', 0.35))
+        sigma = self.sigma
         factor = math.exp(random.gauss(0.0, sigma))   # 对数正态：右偏、有长尾
 
         lo, hi = self.cfg.get('clamp', [0.65, 1.7])
@@ -79,7 +85,7 @@ class Pacing(object):
         factor = min(max(factor, min(lo, hi)), max(lo, hi))
 
         cap = float(self.cfg.get('max-task-minutes', 30)) * 60
-        seconds = int(min(max(estimate * factor, 5.0), cap))
+        seconds = int(min(max(estimate * factor * self.scale, 5.0), cap))
         return TaskPlan(seconds, estimate, questions, pages)
 
     # ---------- 真实等待 ----------
